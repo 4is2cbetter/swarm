@@ -11,6 +11,9 @@ type Cluster interface {
 	// Create a container
 	CreateContainer(config *ContainerConfig, name string) (*Container, error)
 
+	// Set a container
+	SetContainer(container *Container, newConfig *ContainerConfig) error
+
 	// Remove a container
 	RemoveContainer(container *Container, force bool) error
 

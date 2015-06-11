@@ -66,10 +66,10 @@ function teardown() {
   #setting
   run docker_swarm set -m "${ko_mem}g" foo
   echo "set -m ${ko_mem}g foo"
-  [[ "${output}" == *"Cannot exceed resources in SETting"* ]]
+  [[ "${output}" == *"Cannot exceed resources in setting"* ]]
   run docker_swarm set -c ${ko_cpus} bar
   echo "set -c ${ko_cpus} bar"
-  [[ "${output}" == *"Cannot exceed resources in SETting"* ]]
+  [[ "${output}" == *"Cannot exceed resources in setting"* ]]
 
   #ensure nothing has changed
   run docker_swarm info

@@ -343,82 +343,35 @@ func postContainersCreate(c *context, w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-// TODO refactor all:
-// create Set method in swarm/cluster.go
-// add Set method to cluster.go (interface)
-// implement it in mesos/swarm.go (errors.New("Not implemented"))
-// add Set method in samalba/dockerclient (...uff...)
-type justAReadCloser struct {
-	*bytes.Buffer
-}
-func (m justAReadCloser) Close() error { return nil }
-
 // POST /containers/{name:.*}/set
 func postContainersSet(c *context, w http.ResponseWriter, r *http.Request) {
-	_, container, err := getContainerFromVars(c, mux.Vars(r))
-	if err != nil {
-		httpError(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	// copying body
-	var body_bytes []byte
-	if body_bytes, err = ioutil.ReadAll(r.Body); err!= nil {
-		httpError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	body1 := justAReadCloser{bytes.NewBuffer(body_bytes)}
-	body2 := justAReadCloser{bytes.NewBuffer(body_bytes)}
-
-	// create 2 requests:
-	// one to be processed now
-	// the other to be proxied
-	var r1 *http.Request
-	r1, err = http.NewRequest(r.Method, r.URL.String(), body1)
-	if err != nil {
-		httpError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	var r2 *http.Request
-	r2, err = http.NewRequest(r.Method, r.URL.String(), body2)
-	if err != nil {
-		httpError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// getting new configuration
-	r1.ParseForm()
-	var newConfig dockerclient.ContainerConfig
-	if err := json.NewDecoder(r1.Body).Decode(&newConfig); err != nil {
-		httpError(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// checking if we can go on
+	r.ParseForm()
 	var (
-		e = *container.Engine
-		oldConfig = *container.Config
-		usedCpus = e.UsedCpus() - oldConfig.CpuShares
-		usedMemory = e.UsedMemory() - oldConfig.Memory
+		newConfig dockerclient.ContainerConfig
+		name   = mux.Vars(r)["name"]
 	)
 
-	if newConfig.CpuShares + usedCpus > e.TotalCpus() ||
-			newConfig.Memory + usedMemory > e.TotalMemory() {
-		httpError(w, "Cannot exceed resources in SETting", http.StatusInternalServerError)
+	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+		httpError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// proxying request
-	cb := func(resp *http.Response) {
-		// force fresh container
-		container.Refresh()
+	container := c.cluster.Container(name)
+	if container == nil {
+		httpError(w, fmt.Sprintf("Container %s not found", name), http.StatusNotFound)
+		return
 	}
 
-	r2.Header.Set("Content-Type", "application/json")
-	if err := proxyAsync(c.tlsConfig, e.Addr, w, r2, cb); err != nil {
+	err := c.cluster.SetContainer(container, cluster.BuildContainerConfig(newConfig))
+	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "{%q:%q}", "Id", container.Id)
+	return
 }
 
 // DELETE /containers/{name:.*}
