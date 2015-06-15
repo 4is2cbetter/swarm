@@ -62,3 +62,68 @@ function teardown() {
 	# pid
 	[[ "${output}" == *"\"PidMode\": \"host\""* ]]
 }
+
+# TODO do not use fixed values for cpu...
+# use values that depend on the machine we are using
+@test "docker run no cpushares" {
+	start_docker_with_busybox 1
+	swarm_manage
+
+	# make sure no container exist
+	run docker_swarm ps -qa
+	[ "${#lines[@]}" -eq 0 ]
+
+	docker_swarm run --name foo -d -c 2 busybox sh
+
+	run docker_swarm inspect --format='{{.HostConfig.CpuShares}}' foo
+	echo $output
+	[[ "$output" == "0" ]]
+	run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' foo
+	echo $output
+	[[ "$output" == "0,1" ]]
+
+	docker_swarm run --name bar -d -c 1 busybox sh
+	run docker_swarm inspect --format='{{.HostConfig.CpuShares}}' bar
+	echo $output
+	[[ "$output" == "0" ]]
+	run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' bar
+	echo $output
+	[[ "$output" == "2" ]]
+
+	run docker_swarm info
+	echo $output
+	[[ "$output" == *"Reserved CPUs: 3"* ]]
+
+	run docker_swarm run --name baz -d -c 10 busybox sh
+	[ "$status" -ne 0 ] # fail if too much resources
+}
+
+@test "no share overcome resources" {
+	start_docker_with_busybox 1
+	swarm_manage
+
+	run docker_swarm run -d -c 10 busybox sh
+	[ "$status" -ne 0 ] # fail if too much resources
+
+	docker_swarm run --name bar -d -c 1 busybox sh
+	run docker_swarm inspect --format='{{.HostConfig.CpuShares}}' bar
+	echo $output
+	[[ "$output" == "0" ]]
+	run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' bar
+	echo $output
+	[[ "$output" == "0" ]] # occupying first cpusetcpu
+}
+
+@test "no cpu reservation on error" {
+	start_docker_with_busybox 1
+	swarm_manage
+
+	run docker_swarm run --name foo -d busybox sh
+	[ "$status" -eq 0 ]
+	run docker_swarm run --name foo -c 2 -d busybox sh
+	[ "$status" -ne 0 ] # expecting to fail on name conflict...
+
+	run docker_swarm info
+	echo $output
+	[[ "$output" == *"Reserved CPUs: 0"* ]]
+}

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,6 +34,7 @@ func NewEngine(addr string, overcommitRatio float64) *Engine {
 		Labels:          make(map[string]string),
 		stopCh:          make(chan struct{}),
 		containers:      make(map[string]*Container),
+		cpus:            make(map[int64]string),
 		healthy:         true,
 		overcommitRatio: int64(overcommitRatio * 100),
 	}
@@ -54,6 +55,7 @@ type Engine struct {
 
 	stopCh          chan struct{}
 	containers      map[string]*Container
+	cpus            map[int64]string // map that stores for each cpuset the container using it
 	images          []*Image
 	client          dockerclient.Client
 	eventHandler    EventHandler
@@ -363,13 +365,11 @@ func (e *Engine) UsedMemory() int64 {
 
 // UsedCpus returns the sum of CPUs reserved by containers.
 func (e *Engine) UsedCpus() int64 {
-	var r int64
+	var r int
 	e.RLock()
-	for _, c := range e.containers {
-		r += c.Config.CpuShares
-	}
+	r = len(e.cpus)
 	e.RUnlock()
-	return r
+	return int64(r)
 }
 
 // TotalMemory returns the total memory + overcommit
@@ -382,11 +382,51 @@ func (e *Engine) TotalCpus() int64 {
 	return e.Cpus + (e.Cpus * e.overcommitRatio / 100)
 }
 
+// reserves a certain number of cpuset-cpus
+// returns the corresponding string (e.g. "0,1,2") or error
+// if the operation is impossible
+func (e *Engine) reserveCpus(sid string, n int64) (string, error) {
+	free := e.Cpus - int64(e.UsedCpus())
+	if free < n {
+		return "", errors.New("Cannot reserve requested CPUs")
+	}
+
+	cpusetcpus := ""
+
+	e.RLock()
+	defer	e.RUnlock()
+
+	var i, assigned int64
+	for i, assigned = 0, 0; i < e.Cpus && assigned < n; i++ {
+		if _, ok := e.cpus[i]; !ok {
+			// there is no entry in the map,
+			// we can reserve the cpu
+			e.cpus[i] = sid // using swarm id
+			assigned++
+			cpusetcpus += strconv.Itoa(int(i)) + ","
+		}
+	}
+
+	return strings.Trim(cpusetcpus, ","), nil
+}
+
+func (e *Engine) unreserveCpus(deleteSid string) {
+	e.Lock()
+	defer e.Unlock()
+
+	for core, sid := range e.cpus {
+		if sid == deleteSid {
+			delete(e.cpus, core) // unreserve core
+		}
+	}
+}
+
 // Create a new container
 func (e *Engine) Create(config *ContainerConfig, name string, pullImage bool) (*Container, error) {
 	var (
 		err    error
 		id     string
+		sid = config.SwarmID()
 		client = e.client
 	)
 
@@ -395,13 +435,22 @@ func (e *Engine) Create(config *ContainerConfig, name string, pullImage bool) (*
 	// we don't want to mess with the original.
 	dockerConfig := config.ContainerConfig
 
-	// nb of CPUs -> real CpuShares
+	// -c is the number for CPUs
+	ncpus := dockerConfig.CpuShares
 
-	// FIXME remove "duplicate" lines and move this to cluster/config.go
-	dockerConfig.CpuShares = int64(math.Ceil(float64(config.CpuShares*1024) / float64(e.Cpus)))
+	var cpuset string
+	if cpuset, err = e.reserveCpus(sid, ncpus); err != nil{
+		return nil, err
+	}
+
+	dockerConfig.CpuShares = 0
 	dockerConfig.HostConfig.CpuShares = dockerConfig.CpuShares
+	dockerConfig.Cpuset = cpuset
+	dockerConfig.HostConfig.CpusetCpus = dockerConfig.Cpuset
 
 	if id, err = client.CreateContainer(&dockerConfig, name); err != nil {
+		// in case of error, UNDO cpu reservation
+		e.unreserveCpus(sid)
 		// If the error is other than not found, abort immediately.
 		if err != dockerclient.ErrNotFound || !pullImage {
 			return nil, err
@@ -436,7 +485,12 @@ func (e *Engine) RemoveContainer(container *Container, force bool) error {
 	// will rewrite this.
 	e.Lock()
 	defer e.Unlock()
-	delete(e.containers, container.Id)
+
+	delete(e.containers, container.Id) // container removed
+	log.Info(container.Config.CpusUsed())
+	for _, core := range container.Config.CpusUsed() {
+		delete(e.cpus, core) // unreserve core
+	}
 
 	return nil
 }

@@ -146,3 +146,15 @@ func (c *ContainerConfig) Affinities() []string {
 func (c *ContainerConfig) Constraints() []string {
 	return c.extractExprs("constraints")
 }
+
+func (c *ContainerConfig) CpusUsed() []int64 {
+	cores := make([]int64, 0)
+	for sCore := range strings.Split(c.Cpuset, ",") {
+		cores = append(cores, int64(sCore))
+	}
+	return cores
+}
+
+func (c *ContainerConfig) NCpus() int64 {
+	return int64(len(c.CpusUsed()))
+}

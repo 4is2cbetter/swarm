@@ -45,3 +45,31 @@ function teardown() {
 	run docker_swarm ps -aq
 	[ "${#lines[@]}" -eq 0 ]
 }
+
+@test "cpu reservation update on remove" {
+	start_docker_with_busybox 1
+	swarm_manage
+
+	# make sure no container exist
+	run docker_swarm ps -qa
+	[ "${#lines[@]}" -eq 0 ]
+
+	docker_swarm run --name foo -d -c 2 busybox sh
+
+	run docker_swarm inspect --format='{{.HostConfig.CpuShares}}' foo
+	echo $output
+	[[ "$output" == "0" ]]
+	run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' foo
+	echo $output
+	[[ "$output" == "0,1" ]]
+
+	docker_swarm rm -f foo
+	docker_swarm run --name foo -d -c 1 busybox sh
+
+	run docker_swarm inspect --format='{{.HostConfig.CpuShares}}' foo
+	echo $output
+	[[ "$output" == "0" ]]
+	run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' foo
+	echo $output
+	[[ "$output" == "0" ]]
+}
