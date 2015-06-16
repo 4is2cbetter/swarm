@@ -506,8 +506,9 @@ func (e *Engine) TotalMemory() int64 {
 }
 
 // TotalCpus returns the total cpus + overcommit
+// No overcommit because we are not using shares!
 func (e *Engine) TotalCpus() int64 {
-	return e.Cpus + (e.Cpus * e.overcommitRatio / 100)
+	return e.Cpus // + (e.Cpus * e.overcommitRatio / 100)
 }
 
 // Create a new container
