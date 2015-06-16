@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"strconv"
 	"sync"
@@ -27,6 +28,124 @@ const (
 	minSupportedVersion = version.Version("1.6.0")
 )
 
+// Data type for cores' status.
+// Simply a wrapper around a map of core -> container_id,
+// plus a dedicated Mutex.
+// Only used into the engine.
+type cores struct {
+	sync.RWMutex
+	coreMap  map[int]string
+	cpus     int64
+}
+
+func newCores(cpus int64) *cores {
+	return &cores{
+		coreMap: make(map[int]string),
+		cpus:    cpus,
+	}
+}
+
+func (c *cores) usedCpus() int {
+	c.RLock()
+	defer c.RUnlock()
+	return len(c.coreMap)
+}
+
+// Updates cores to match the number of reservations passed.
+// Returns:
+//   - the corresponding string (e.g. "0,1,2") for the cores
+//     to be allocated (to be used in container.Config.CpusetCpus)
+//   - a function to apply reservation (onSuccess)
+//   _ a function to skip reservation (onError)
+//   - an error, if any
+//
+// WARNING:
+// Once called, this function locks the cores. It is necessary to call one of the
+// callbacks returned to unlock them.
+func (c *cores) updateCpus(sid string, n int) (string, func(), func(), error) {
+	free := c.cpus - int64(c.usedCpus())
+	if free < int64(n) {
+		return "", nil, nil, errors.New("Cannot reserve requested CPUs")
+	}
+
+	// utils
+	getRetStr := func(coreSlice []int) string {
+		retStr := ""
+		for _, cn := range coreSlice {
+			retStr += strconv.Itoa(cn) + ","
+		}
+		return strings.Trim(retStr, ",")
+	}
+
+	getCores := func(sid string) []int {
+		var assigned []int
+		assigned = make([]int, 0, c.cpus)
+		for core, v := range c.coreMap {
+			if v == sid {
+				assigned = append(assigned, core)
+			}
+		}
+		sort.Ints(assigned)
+		return assigned
+	}
+
+	c.Lock()
+
+	var (
+		cCores = getCores(sid)
+		nCores = len(cCores)
+		coreDiff = nCores - n
+		// return
+		cpusetcpus = ""
+		onSuccess func()
+		onError func()
+	)
+
+	switch {
+	case coreDiff > 0: // this means we have to unreserve some core
+		toDel := cCores[n:]
+
+		onSuccess = func() {
+			for _, cn := range toDel {
+				delete(c.coreMap, cn)
+			}
+			c.Unlock()
+		}
+		cpusetcpus = getRetStr(cCores[:n])
+	case coreDiff < 0: // this means we have to reserve some core
+		coreDiff = -coreDiff
+		for i, assigned := 0, 0; int64(i) < c.cpus && assigned < coreDiff; i++ {
+			if _, ok := c.coreMap[i]; !ok {
+				// there is no entry in the map,
+				// we can reserve the cpu
+				assigned++
+				cCores = append(cCores, i)
+			}
+		}
+
+		sort.Ints(cCores)
+		onSuccess = func(){
+			for _, cn := range cCores {
+				c.coreMap[cn] = sid
+			}
+			c.Unlock()
+		}
+		cpusetcpus = getRetStr(cCores)
+	default:
+		onSuccess = func() {
+			c.Unlock()
+		}
+		cpusetcpus = getRetStr(cCores)
+	}
+
+	onError = func() {
+		// does nothing, but unlocks
+		c.Unlock()
+	}
+
+	return cpusetcpus, onSuccess, onError, nil
+}
+
 // NewEngine is exported
 func NewEngine(addr string, overcommitRatio float64) *Engine {
 	e := &Engine{
@@ -34,8 +153,8 @@ func NewEngine(addr string, overcommitRatio float64) *Engine {
 		Labels:          make(map[string]string),
 		stopCh:          make(chan struct{}),
 		containers:      make(map[string]*Container),
-		cpus:            make(map[int64]string),
 		healthy:         true,
+		coreStatus:      nil,
 		overcommitRatio: int64(overcommitRatio * 100),
 	}
 	return e
@@ -55,7 +174,7 @@ type Engine struct {
 
 	stopCh          chan struct{}
 	containers      map[string]*Container
-	cpus            map[int64]string // map that stores for each cpuset the container using it
+	coreStatus      *cores
 	images          []*Image
 	client          dockerclient.Client
 	eventHandler    EventHandler
@@ -176,6 +295,10 @@ func (e *Engine) updateSpecs() error {
 	for _, label := range info.Labels {
 		kv := strings.SplitN(label, "=", 2)
 		e.Labels[kv[0]] = kv[1]
+	}
+	if e.coreStatus == nil {
+		// update only if it is the first time
+		e.coreStatus = newCores(e.Cpus)
 	}
 	return nil
 }
@@ -365,11 +488,7 @@ func (e *Engine) UsedMemory() int64 {
 
 // UsedCpus returns the sum of CPUs reserved by containers.
 func (e *Engine) UsedCpus() int64 {
-	var r int
-	e.RLock()
-	r = len(e.cpus)
-	e.RUnlock()
-	return int64(r)
+	return int64(e.coreStatus.usedCpus())
 }
 
 // TotalMemory returns the total memory + overcommit
@@ -380,45 +499,6 @@ func (e *Engine) TotalMemory() int64 {
 // TotalCpus returns the total cpus + overcommit
 func (e *Engine) TotalCpus() int64 {
 	return e.Cpus + (e.Cpus * e.overcommitRatio / 100)
-}
-
-// reserves a certain number of cpuset-cpus
-// returns the corresponding string (e.g. "0,1,2") or error
-// if the operation is impossible
-func (e *Engine) reserveCpus(sid string, n int64) (string, error) {
-	free := e.Cpus - int64(e.UsedCpus())
-	if free < n {
-		return "", errors.New("Cannot reserve requested CPUs")
-	}
-
-	cpusetcpus := ""
-
-	e.RLock()
-	defer	e.RUnlock()
-
-	var i, assigned int64
-	for i, assigned = 0, 0; i < e.Cpus && assigned < n; i++ {
-		if _, ok := e.cpus[i]; !ok {
-			// there is no entry in the map,
-			// we can reserve the cpu
-			e.cpus[i] = sid // using swarm id
-			assigned++
-			cpusetcpus += strconv.Itoa(int(i)) + ","
-		}
-	}
-
-	return strings.Trim(cpusetcpus, ","), nil
-}
-
-func (e *Engine) unreserveCpus(deleteSid string) {
-	e.Lock()
-	defer e.Unlock()
-
-	for core, sid := range e.cpus {
-		if sid == deleteSid {
-			delete(e.cpus, core) // unreserve core
-		}
-	}
 }
 
 // Create a new container
@@ -438,19 +518,29 @@ func (e *Engine) Create(config *ContainerConfig, name string, pullImage bool) (*
 	// -c is the number for CPUs
 	ncpus := dockerConfig.CpuShares
 
-	var cpuset string
-	if cpuset, err = e.reserveCpus(sid, ncpus); err != nil{
-		return nil, err
+	var (
+		cpuset     string
+		onSuccess = func(){} // does nothing by default
+		onError   = func(){} // does nothing by default
+	)
+
+	if ncpus != 0 {
+		// core reservation required
+		if cpuset, onSuccess, onError, err = e.coreStatus.updateCpus(sid, int(ncpus)); err != nil{
+			// in case of error, invoke onError
+			onError()
+			return nil, err
+		}
+
+		dockerConfig.CpuShares = 0
+		dockerConfig.HostConfig.CpuShares = dockerConfig.CpuShares
+		dockerConfig.Cpuset = cpuset
+		dockerConfig.HostConfig.CpusetCpus = dockerConfig.Cpuset
 	}
 
-	dockerConfig.CpuShares = 0
-	dockerConfig.HostConfig.CpuShares = dockerConfig.CpuShares
-	dockerConfig.Cpuset = cpuset
-	dockerConfig.HostConfig.CpusetCpus = dockerConfig.Cpuset
-
 	if id, err = client.CreateContainer(&dockerConfig, name); err != nil {
-		// in case of error, UNDO cpu reservation
-		e.unreserveCpus(sid)
+		// in case of error, invoke onError
+		onError()
 		// If the error is other than not found, abort immediately.
 		if err != dockerclient.ErrNotFound || !pullImage {
 			return nil, err
@@ -464,6 +554,9 @@ func (e *Engine) Create(config *ContainerConfig, name string, pullImage bool) (*
 			return nil, err
 		}
 	}
+
+	// in case of success, invoke onSuccess
+	onSuccess()
 
 	// Register the container immediately while waiting for a state refresh.
 	// Force a state refresh to pick up the newly created container.
@@ -484,12 +577,13 @@ func (e *Engine) RemoveContainer(container *Container, force bool) error {
 	// Remove the container from the state. Eventually, the state refresh loop
 	// will rewrite this.
 	e.Lock()
+	e.coreStatus.Lock()
+	defer e.coreStatus.Unlock()
 	defer e.Unlock()
 
 	delete(e.containers, container.Id) // container removed
-	log.Info(container.Config.CpusUsed())
 	for _, core := range container.Config.CpusUsed() {
-		delete(e.cpus, core) // unreserve core
+		delete(e.coreStatus.coreMap, core) // unreserve core
 	}
 
 	return nil
