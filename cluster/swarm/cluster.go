@@ -149,7 +149,7 @@ func (c *Cluster) SetContainer(container *cluster.Container, newConfig *cluster.
 	}
 
 	// everything is ok, we can apply newConfig
-	if err:= e.Set(container, newConfig); err != nil {
+	if err := e.Set(container, newConfig); err != nil {
 		return err
 	}
 
@@ -159,7 +159,12 @@ func (c *Cluster) SetContainer(container *cluster.Container, newConfig *cluster.
 		Config: newConfig,
 	}
 
-	return c.store.Replace(container.Id, st)
+	if err := c.store.Replace(container.Id, st); err == state.ErrNotFound {
+		log.Debugf("Set: container %s not found in the store, adding it", container.Id)
+		return c.store.Add(container.Id, st)
+	}
+
+	return nil
 }
 
 // RemoveContainer aka Remove a container from the cluster. Containers should
