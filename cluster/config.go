@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/samalba/dockerclient"
@@ -149,8 +150,15 @@ func (c *ContainerConfig) Constraints() []string {
 
 func (c *ContainerConfig) CpusUsed() []int {
 	cores := make([]int, 0)
-	for sCore := range strings.Split(c.Cpuset, ",") {
-		cores = append(cores, sCore)
+	if c.Cpuset == "" {
+		return cores
+	}
+
+	for _, sCore := range strings.Split(c.Cpuset, ",") {
+		// Intentionally ignoring the error.
+		// It should NEVER happen!
+		intCore, _ := strconv.Atoi(sCore)
+		cores = append(cores, intCore)
 	}
 	return cores
 }
