@@ -31,7 +31,8 @@ function teardown() {
   [[ "${output}" == *"Reserved Memory: 1 GiB"* ]]
 
   #setting
-  docker_swarm set -m 2g foo
+  run docker_swarm set -m 2g foo
+  [ "$status" -eq 0 ]
 
   run docker_swarm inspect --format='{{.HostConfig.Memory}}' foo
   [ "$status" -eq 0 ]
@@ -66,13 +67,42 @@ function teardown() {
   #setting
   run docker_swarm set -m "${ko_mem}g" foo
   echo "set -m ${ko_mem}g foo"
+  [ "$status" -ne 0 ]
   [[ "${output}" == *"Cannot exceed resources in setting"* ]]
   run docker_swarm set -c ${ko_cpus} bar
   echo "set -c ${ko_cpus} bar"
-  [[ "${output}" == *"Cannot exceed resources in setting"* ]]
+  [ "$status" -ne 0 ]
+  [[ "${output}" == *"Cannot reserve requested CPUs"* ]]
 
   #ensure nothing has changed
   run docker_swarm info
+  echo $output
   [[ "$output" == *"Reserved Memory: $ok_mem GiB"* ]]
   [[ "$output" == *"Reserved CPUs: $ok_cpus"* ]]
+}
+
+@test "set down" {
+  start_docker_with_busybox 1
+  swarm_manage
+
+  # make sure no container exist
+  run docker_swarm ps -qa
+  [ "${#lines[@]}" -eq 0 ]
+
+  # TODO use right number of cores...
+  run docker_swarm run -d -c 3 --name foo busybox sleep 3
+  [ "$status" -eq 0 ]
+
+  run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' foo
+  echo $output
+  [[ "$output" == "0,1,2" ]]
+  run docker_swarm set -c 2 foo
+  [ "$status" -eq 0 ]
+  run docker_swarm inspect --format='{{.HostConfig.CpusetCpus}}' foo
+  echo $output
+  [[ "$output" == "0,1" || "$output" == "0,2" || "$output" == "1,2" ]]
+
+  run docker_swarm info
+  echo $output
+  [[ "$output" == *"Reserved CPUs: 2"* ]]
 }

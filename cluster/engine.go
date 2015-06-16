@@ -69,11 +69,6 @@ func (c *cores) usedCpus() int {
 // Once called, this function locks the cores. It is necessary to call one of the
 // callbacks returned to unlock them.
 func (c *cores) updateCpus(sid string, n int) (string, func(), func(), error) {
-	free := c.cpus - int64(c.usedCpus())
-	if free < int64(n) {
-		return "", nil, nil, errors.New("Cannot reserve requested CPUs")
-	}
-
 	// utils
 	getRetStr := func(coreSlice []int) string {
 		retStr := ""
@@ -102,10 +97,15 @@ func (c *cores) updateCpus(sid string, n int) (string, func(), func(), error) {
 		nCores = len(cCores)
 		coreDiff = nCores - n
 		// return
-		cpusetcpus = ""
-		onSuccess func()
-		onError func()
+		cpusetcpus = getRetStr(cCores)
+		onSuccess  = func() { c.Unlock() }
+		onError    = func() { c.Unlock() }
 	)
+
+	free := c.cpus - int64(len(c.coreMap)) + int64(nCores) // as if the container is not there
+	if free < int64(n) {
+		return cpusetcpus, onSuccess, onError, errors.New("Cannot reserve requested CPUs")
+	}
 
 	switch {
 	case coreDiff > 0: // this means we have to unreserve some core
@@ -138,15 +138,7 @@ func (c *cores) updateCpus(sid string, n int) (string, func(), func(), error) {
 		}
 		cpusetcpus = getRetStr(cCores)
 	default:
-		onSuccess = func() {
-			c.Unlock()
-		}
 		cpusetcpus = getRetStr(cCores)
-	}
-
-	onError = func() {
-		// does nothing, but unlocks
-		c.Unlock()
 	}
 
 	return cpusetcpus, onSuccess, onError, nil
@@ -512,7 +504,7 @@ func (e *Engine) Create(config *ContainerConfig, name string, pullImage bool) (*
 	var (
 		err    error
 		id     string
-		sid = config.SwarmID()
+		sid    = config.SwarmID()
 		client = e.client
 	)
 
@@ -583,15 +575,10 @@ type setClient struct {
 
 // TODO add this (with some minor editing) to samalba's client
 func (client *setClient) SetContainer(newConfig *ContainerConfig, id string) error {
-	// ignoring cpuset-cpus and others...
-	// only using memory and shares
-	if newConfig.Cpuset != "" {
-		log.Warn("--cpuset-cpus has no meaning in cluster context. Ignoring.")
-	}
-	log.Warn("Taking into account only CpuShares and Memory (for now).")
+	log.Warn("Taking into account only Cpuset and Memory.")
 	hostConfig := dockerclient.HostConfig{
-		CpuShares:  newConfig.CpuShares,
-		Memory:     newConfig.Memory,
+		CpusetCpus:  newConfig.Cpuset,
+		Memory:      newConfig.Memory,
 	}
 
 	data, err := json.Marshal(hostConfig)
@@ -672,13 +659,37 @@ func (client *setClient) doStreamRequest(method string, path string, in io.Reade
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> TODO to here
 
 func (e *Engine) Set(container *Container, newConfig *ContainerConfig) error {
+	var (
+		err        error
+		cpuset     string
+		onSuccess  func()
+		onError    func()
+		sid        = container.Config.SwarmID()
+	)
+
+	ncpus := newConfig.CpuShares
+
+	// always lock cores on set
+	if cpuset, onSuccess, onError, err = e.coreStatus.updateCpus(sid, int(ncpus)); err != nil{
+		// in case of error, invoke onError
+		onError()
+		return err
+	}
+
+	newConfig.CpuShares = 0
+	newConfig.HostConfig.CpuShares = newConfig.CpuShares
+	newConfig.Cpuset = cpuset
+	newConfig.HostConfig.CpusetCpus = newConfig.Cpuset
+
 	// TODO change to e.client.SetContainer(...)
 	// once added to samalba's client.
 	setclient := setClient{e.client.(*dockerclient.DockerClient)}
 	if err := setclient.SetContainer(newConfig, container.Id); err != nil {
+		onError()
 		return err
 	}
 
+	onSuccess()
 	// force refresh
 	e.refreshContainer(container.Id, true)
 	return nil

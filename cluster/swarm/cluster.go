@@ -131,8 +131,8 @@ func (c *Cluster) SetContainer(container *cluster.Container, newConfig *cluster.
 	var (
 		e = *container.Engine
 		oldConfig = *container.Config
-		usedCpus = e.UsedCpus() - oldConfig.CpuShares * e.Cpus / 1024.0
-		cpusToUse = usedCpus + newConfig.CpuShares
+		usedCpus = e.UsedCpus() - int64(oldConfig.NCpus())
+		cpusToUse = usedCpus + int64(newConfig.NCpus())
 		usedMemory = e.UsedMemory() - oldConfig.Memory
 		memoryToUse = usedMemory + newConfig.Memory
 	)
