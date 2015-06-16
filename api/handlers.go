@@ -343,6 +343,37 @@ func postContainersCreate(c *context, w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+// POST /containers/{name:.*}/set
+func postContainersSet(c *context, w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	var (
+		newConfig dockerclient.ContainerConfig
+		name   = mux.Vars(r)["name"]
+	)
+
+	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+		httpError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	container := c.cluster.Container(name)
+	if container == nil {
+		httpError(w, fmt.Sprintf("Container %s not found", name), http.StatusNotFound)
+		return
+	}
+
+	err := c.cluster.SetContainer(container, cluster.BuildContainerConfig(newConfig))
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "{%q:%q}", "Id", container.Id)
+	return
+}
+
 // DELETE /containers/{name:.*}
 func deleteContainers(c *context, w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {

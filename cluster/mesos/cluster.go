@@ -148,6 +148,11 @@ func (c *Cluster) CreateContainer(config *cluster.ContainerConfig, name string) 
 	}
 }
 
+// SetContainer to change some container's memory or cpu usage
+func (c *Cluster) SetContainer(container *cluster.Container, newConfig *cluster.ContainerConfig) error {
+	return errors.New("Not implemented")
+}
+
 // RemoveContainer to remove containers on mesos cluster
 func (c *Cluster) RemoveContainer(container *cluster.Container, force bool) error {
 	c.scheduler.Lock()

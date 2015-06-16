@@ -122,6 +122,46 @@ func (c *Cluster) CreateContainer(config *cluster.ContainerConfig, name string) 
 	return nil, nil
 }
 
+// SetContainer to change some container's memory or cpu usage
+func (c *Cluster) SetContainer(container *cluster.Container, newConfig *cluster.ContainerConfig) error {
+	c.scheduler.Lock()
+	defer c.scheduler.Unlock()
+
+	// check if newConfig is feasible
+	var (
+		e = *container.Engine
+		oldConfig = *container.Config
+		usedCpus = e.UsedCpus() - oldConfig.CpuShares * e.Cpus / 1024.0
+		cpusToUse = usedCpus + newConfig.CpuShares
+		usedMemory = e.UsedMemory() - oldConfig.Memory
+		memoryToUse = usedMemory + newConfig.Memory
+	)
+
+	if cpusToUse > e.TotalCpus() || memoryToUse > e.TotalMemory() {
+		return errors.New(
+			fmt.Sprintf(
+				"Cannot exceed resources in setting: %s / %s GiB, %d / %d CPUs",
+				units.BytesSize(float64(memoryToUse)),
+				units.BytesSize(float64(e.TotalMemory())),
+				cpusToUse, e.TotalCpus(),
+			),
+		)
+	}
+
+	// everything is ok, we can apply newConfig
+	if err:= e.Set(container, newConfig); err != nil {
+		return err
+	}
+
+	st := &state.RequestedState{
+		ID:     container.Id,
+		Name:   container.Info.Name,
+		Config: newConfig,
+	}
+
+	return c.store.Replace(container.Id, st)
+}
+
 // RemoveContainer aka Remove a container from the cluster. Containers should
 // always be destroyed through the scheduler to guarantee atomicity.
 func (c *Cluster) RemoveContainer(container *cluster.Container, force bool) error {

@@ -15,6 +15,12 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/version"
 	"github.com/samalba/dockerclient"
+
+	// TODO remove once added to samalba's client.
+	"encoding/json"
+	"bytes"
+	"io/ioutil"
+	"net/http"
 )
 
 const (
@@ -566,6 +572,116 @@ func (e *Engine) Create(config *ContainerConfig, name string, pullImage bool) (*
 	defer e.RUnlock()
 
 	return e.containers[id], nil
+}
+
+// Set a container
+// TODO remove once added to samalba's client.
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> TODO remove from here
+type setClient struct {
+	*dockerclient.DockerClient
+}
+
+// TODO add this (with some minor editing) to samalba's client
+func (client *setClient) SetContainer(newConfig *ContainerConfig, id string) error {
+	// ignoring cpuset-cpus and others...
+	// only using memory and shares
+	if newConfig.Cpuset != "" {
+		log.Warn("--cpuset-cpus has no meaning in cluster context. Ignoring.")
+	}
+	log.Warn("Taking into account only CpuShares and Memory (for now).")
+	hostConfig := dockerclient.HostConfig{
+		CpuShares:  newConfig.CpuShares,
+		Memory:     newConfig.Memory,
+	}
+
+	data, err := json.Marshal(hostConfig)
+	if err != nil {
+		return err
+	}
+
+	uri := fmt.Sprintf("/containers/%s/set", id)
+	data, err = client.doRequest("POST", uri, data, nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (client *setClient) doRequest(method string, path string, body []byte, headers map[string]string) ([]byte, error) {
+	b := bytes.NewBuffer(body)
+
+	reader, err := client.doStreamRequest(method, path, b, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	defer reader.Close()
+	data, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+type dockerClientError struct {
+	StatusCode int
+	Status     string
+	msg        string
+}
+
+func (e dockerClientError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Status, e.msg)
+}
+
+func (client *setClient) doStreamRequest(method string, path string, in io.Reader, headers map[string]string) (io.ReadCloser, error) {
+	if (method == "POST" || method == "PUT") && in == nil {
+		in = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequest(method, client.URL.String()+path, in)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Content-Type", "application/json")
+	if headers != nil {
+		for header, value := range headers {
+			req.Header.Add(header, value)
+		}
+	}
+	resp, err := client.HTTPClient.Do(req)
+	if err != nil {
+		if !strings.Contains(err.Error(), "connection refused") && client.TLSConfig == nil {
+			return nil, fmt.Errorf("%v. Are you trying to connect to a TLS-enabled daemon without TLS?", err)
+		}
+		return nil, err
+	}
+	if resp.StatusCode == 404 {
+		return nil, dockerclient.ErrNotFound
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		data, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		return nil, dockerClientError{StatusCode: resp.StatusCode, Status: resp.Status, msg: string(data)}
+	}
+
+	return resp.Body, nil
+}
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> TODO to here
+
+func (e *Engine) Set(container *Container, newConfig *ContainerConfig) error {
+	// TODO change to e.client.SetContainer(...)
+	// once added to samalba's client.
+	setclient := setClient{e.client.(*dockerclient.DockerClient)}
+	if err := setclient.SetContainer(newConfig, container.Id); err != nil {
+		return err
+	}
+
+	// force refresh
+	e.refreshContainer(container.Id, true)
+	return nil
 }
 
 // RemoveContainer a container from the engine.
