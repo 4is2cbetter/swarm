@@ -402,9 +402,20 @@ func (e *Engine) updateContainer(c dockerclient.Container, containers map[string
 		// cluster.ContainerConfig.
 		container.Config = BuildContainerConfig(*info.Config)
 
-		// FIXME remove "duplicate" lines and move this to cluster/config.go
-		container.Config.CpuShares = container.Config.CpuShares * e.Cpus / 1024.0
-		container.Config.HostConfig.CpuShares = container.Config.CpuShares
+		// refreshing core reservation
+		cCores := container.Config.CpusUsed()
+		sid := container.Config.SwarmID()
+
+		e.coreStatus.Lock()
+		for _, c := range cCores {
+			if v, ok := e.coreStatus.coreMap[c]; v != sid && ok {
+				// this means the core has already been
+				// reserved for another container
+				log.Warn("Conflict in refreshing container's core reservations. Overriding...")
+			}
+			e.coreStatus.coreMap[c] = sid
+		}
+		e.coreStatus.Unlock()
 
 		// Save the entire inspect back into the container.
 		container.Info = *info
