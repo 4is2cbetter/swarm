@@ -100,12 +100,15 @@ func (c *Cluster) CreateContainer(config *cluster.ContainerConfig, name string) 
 	// Associate a Swarm ID to the container we are creating.
 	config.SetSwarmID(c.generateUniqueID())
 
+	// Passing config as it is, no processing 
+	// has been performed on it.
 	n, err := c.scheduler.SelectNodeForContainer(c.listNodes(), config)
 	if err != nil {
 		return nil, err
 	}
 
 	if nn, ok := c.engines[n.ID]; ok {
+		// The processing on config will be performed here.
 		container, err := nn.Create(config, name, true)
 		if err != nil {
 			return nil, err

@@ -34,8 +34,11 @@ func (n weightedNodeList) Less(i, j int) bool {
 
 func weighNodes(config *cluster.ContainerConfig, nodes []*node.Node) (weightedNodeList, error) {
 	weightedNodes := weightedNodeList{}
-	nCpus := int64(config.NCpus())
-	mem := int64(config.Memory)
+	// At this point, config hasn't already been
+	// processed. So, CpuShares has not been set to 0.
+	// It still contains the number of cpus.
+	nCpus := config.CpuShares
+	mem := config.Memory
 
 	for _, node := range nodes {
 		nodeMemory := node.TotalMemory
